@@ -1,0 +1,30 @@
+{
+  "name": "이어읽기 텍스트 뷰어",
+  "short_name": "이어읽기",
+  "description": "PC, 모바일, 태블릿에서 TXT 문서를 이어서 읽는 개인용 뷰어",
+  "lang": "ko-KR",
+  "start_url": "./#/library",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f4f6f8",
+  "theme_color": "#111827",
+  "icons": [
+    {
+      "src": "./icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "./icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "./icons/maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

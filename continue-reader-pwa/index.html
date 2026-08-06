@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#111827" />
+  <meta name="description" content="PC, 모바일, 태블릿에서 읽던 위치를 이어서 읽는 개인용 TXT 뷰어" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" href="./icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="./icons/icon-192.png" />
+  <link rel="stylesheet" href="./styles.css" />
+  <title>이어읽기</title>
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <section id="config-screen" class="screen centered hidden" aria-labelledby="config-title">
+      <div class="panel narrow">
+        <h1 id="config-title">초기 설정이 필요합니다</h1>
+        <p><code>config.js</code> 파일에 Supabase 프로젝트 주소와 공개 키를 입력해 주세요.</p>
+        <pre class="code-box">window.APP_CONFIG = {
+  SUPABASE_URL: "https://프로젝트.supabase.co",
+  SUPABASE_ANON_KEY: "공개 anon 또는 publishable key"
+};</pre>
+        <p class="muted">자세한 방법은 README.md를 확인해 주세요.</p>
+      </div>
+    </section>
+
+    <section id="login-screen" class="screen centered hidden" aria-labelledby="login-title">
+      <div class="panel narrow login-panel">
+        <div class="brand-mark" aria-hidden="true">읽</div>
+        <h1 id="login-title">이어읽기</h1>
+        <p class="muted">본인 계정으로 로그인하세요.</p>
+        <form id="login-form" class="stack-form">
+          <label>
+            <span>이메일</span>
+            <input id="login-email" type="email" autocomplete="username" required />
+          </label>
+          <label>
+            <span>비밀번호</span>
+            <input id="login-password" type="password" autocomplete="current-password" required />
+          </label>
+          <button id="login-button" class="primary-button" type="submit">로그인</button>
+        </form>
+        <p id="login-error" class="error-text" role="alert"></p>
+      </div>
+    </section>
+
+    <section id="library-screen" class="screen hidden">
+      <header class="topbar">
+        <div>
+          <h1>내 텍스트</h1>
+          <p id="account-label" class="muted small"></p>
+        </div>
+        <div class="topbar-actions">
+          <button id="install-button" class="ghost-button hidden" type="button">앱 설치</button>
+          <button id="logout-button" class="ghost-button" type="button">로그아웃</button>
+        </div>
+      </header>
+
+      <main class="library-main">
+        <section class="upload-card panel" aria-labelledby="upload-title">
+          <div class="section-heading">
+            <div>
+              <h2 id="upload-title">TXT 파일 추가</h2>
+              <p class="muted">UTF-8, EUC-KR, CP949 형식을 지원합니다.</p>
+            </div>
+          </div>
+          <form id="upload-form" class="upload-grid">
+            <label class="file-picker">
+              <span id="file-name-label">TXT 파일 선택</span>
+              <input id="file-input" type="file" accept=".txt,text/plain" required />
+            </label>
+            <label>
+              <span>문서 제목</span>
+              <input id="title-input" type="text" maxlength="120" placeholder="파일명으로 자동 입력" />
+            </label>
+            <label>
+              <span>파일 인코딩</span>
+              <select id="encoding-select">
+                <option value="auto">자동 감지</option>
+                <option value="utf-8">UTF-8</option>
+                <option value="euc-kr">EUC-KR / CP949</option>
+              </select>
+            </label>
+            <button id="upload-button" class="primary-button" type="submit">등록</button>
+          </form>
+          <div id="upload-status" class="status-line" aria-live="polite"></div>
+        </section>
+
+        <section aria-labelledby="documents-title">
+          <div class="section-heading documents-heading">
+            <div>
+              <h2 id="documents-title">문서 목록</h2>
+              <p id="document-count" class="muted"></p>
+            </div>
+            <button id="refresh-library-button" class="ghost-button" type="button">새로고침</button>
+          </div>
+          <div id="document-list" class="document-grid"></div>
+          <div id="empty-library" class="empty-state hidden">
+            <strong>등록된 문서가 없습니다.</strong>
+            <span>위에서 TXT 파일을 추가해 주세요.</span>
+          </div>
+        </section>
+      </main>
+    </section>
+
+    <section id="reader-screen" class="screen reader-screen hidden">
+      <header id="reader-toolbar" class="reader-toolbar">
+        <div class="reader-toolbar-row">
+          <button id="back-button" class="icon-button" type="button" aria-label="서재로 돌아가기">←</button>
+          <div class="reader-title-wrap">
+            <strong id="reader-title">문서</strong>
+            <span id="reader-sync-state" class="muted small">불러오는 중</span>
+          </div>
+          <button id="reader-menu-button" class="icon-button" type="button" aria-label="읽기 설정 열기">Aa</button>
+        </div>
+        <div class="reader-progress-track" aria-hidden="true">
+          <div id="reader-progress-bar" class="reader-progress-bar"></div>
+        </div>
+      </header>
+
+      <aside id="reader-settings-panel" class="reader-settings-panel hidden" aria-label="읽기 설정">
+        <div class="settings-header">
+          <strong>읽기 설정</strong>
+          <button id="close-settings-button" class="icon-button" type="button" aria-label="설정 닫기">×</button>
+        </div>
+
+        <label class="range-row">
+          <span>글자 크기 <b id="font-size-value">20px</b></span>
+          <input id="font-size-range" type="range" min="14" max="34" step="1" />
+        </label>
+        <label class="range-row">
+          <span>줄 간격 <b id="line-height-value">1.8</b></span>
+          <input id="line-height-range" type="range" min="1.35" max="2.4" step="0.05" />
+        </label>
+        <label>
+          <span>본문 폭</span>
+          <select id="content-width-select">
+            <option value="620">좁게</option>
+            <option value="760">보통</option>
+            <option value="920">넓게</option>
+            <option value="1200">아주 넓게</option>
+          </select>
+        </label>
+        <label>
+          <span>화면 모드</span>
+          <select id="theme-select">
+            <option value="system">기기 설정</option>
+            <option value="light">밝게</option>
+            <option value="dark">어둡게</option>
+            <option value="sepia">종이색</option>
+          </select>
+        </label>
+        <label class="toggle-row">
+          <span>읽는 동안 화면 켜기</span>
+          <input id="wake-lock-toggle" type="checkbox" />
+        </label>
+        <button id="fullscreen-button" class="secondary-button" type="button">전체 화면</button>
+      </aside>
+
+      <div class="reader-searchbar">
+        <input id="reader-search-input" type="search" placeholder="문서 내 검색" aria-label="문서 내 검색" />
+        <button id="reader-search-button" class="ghost-button" type="button">찾기</button>
+        <span id="reader-progress-label" class="progress-label">0%</span>
+      </div>
+
+      <main id="reader-scroll" class="reader-scroll">
+        <article id="reader-content" class="reader-content" aria-live="polite"></article>
+        <div id="reader-loading" class="reader-loading">문서를 불러오는 중입니다.</div>
+      </main>
+    </section>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <script src="./config.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.110.8"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
