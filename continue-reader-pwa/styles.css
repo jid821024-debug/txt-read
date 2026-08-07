@@ -329,3 +329,91 @@ body[data-reader-theme="light"] {
   .tts-play-button { min-width: 105px; }
   .tts-stop-button { padding-inline: 10px; }
 }
+
+/* v3 · TXT + EPUB */
+.field-disabled { opacity: .55; }
+.field-disabled select { cursor: not-allowed; }
+.document-card-header { display: grid; grid-template-columns: 62px minmax(0, 1fr); gap: 14px; align-items: start; }
+.document-cover {
+  display: grid;
+  place-items: center;
+  width: 62px;
+  height: 86px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px 12px 12px 8px;
+  color: var(--muted);
+  background: linear-gradient(145deg, var(--panel-soft), #e5eaf0);
+  box-shadow: 4px 5px 12px rgba(15, 23, 42, .09);
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: .08em;
+}
+.document-cover img { width: 100%; height: 100%; object-fit: cover; }
+.document-heading { min-width: 0; }
+.document-heading h3 { margin-top: 7px; }
+.document-author { margin: 6px 0 0; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.file-type-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: .04em;
+}
+.file-type-badge.epub { color: #6d28d9; background: #ede9fe; }
+.file-type-badge.txt { color: #0f766e; background: #ccfbf1; }
+.reader-toolbar-row { grid-template-columns: 44px minmax(0, 1fr) 58px 44px; }
+.reader-toc-button { width: 58px; font-size: 12px; font-weight: 800; }
+.reader-toc-panel {
+  position: fixed;
+  z-index: 61;
+  top: 65px;
+  left: max(14px, calc((100vw - 1100px) / 2));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+  width: min(370px, calc(100vw - 28px));
+  max-height: min(72vh, 680px);
+  padding: 18px;
+  border: 1px solid rgba(148, 163, 184, .32);
+  border-radius: 16px;
+  color: var(--reader-text);
+  background: var(--reader-bg);
+  box-shadow: 0 22px 60px rgba(15, 23, 42, .18);
+}
+.reader-toc-panel .settings-header > div { display: grid; gap: 3px; }
+.reader-toc-list { display: grid; align-content: start; gap: 4px; min-height: 0; overflow: auto; padding-right: 3px; }
+.toc-entry {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px 8px calc(10px + var(--toc-depth, 0) * 15px);
+  border: 0;
+  border-radius: 9px;
+  color: var(--reader-text);
+  background: transparent;
+  text-align: left;
+  line-height: 1.45;
+}
+.toc-entry:hover, .toc-entry:focus-visible { background: color-mix(in srgb, var(--accent) 11%, transparent); }
+.reader-toc-empty { padding: 24px 6px; color: var(--muted); text-align: center; }
+.reader-chapter-title {
+  margin: 2.4em 0 1.25em;
+  padding: .55em .35em .5em;
+  border-bottom: 1px solid color-mix(in srgb, var(--reader-text) 17%, transparent);
+  font-size: 1.45em;
+  line-height: 1.4;
+}
+.reader-chapter-title:first-child { margin-top: .4em; }
+.reader-section-heading { margin: 1.8em 0 .8em; font-size: 1.15em; line-height: 1.45; }
+.reader-chapter-title.tts-active, .reader-section-heading.tts-active { border-radius: 8px; }
+
+@media (max-width: 600px) {
+  .reader-toolbar-row { grid-template-columns: 42px minmax(0, 1fr) 52px 42px; padding-inline: 8px; }
+  .reader-toc-button { width: 52px; }
+  .reader-toc-panel { top: 62px; left: 10px; width: calc(100vw - 20px); max-height: 70vh; }
+  .document-card-header { grid-template-columns: 56px minmax(0, 1fr); }
+  .document-cover { width: 56px; height: 78px; }
+}

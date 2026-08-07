@@ -1,7 +1,9 @@
 (() => {
   "use strict";
 
-  const MAX_FILE_SIZE = 20 * 1024 * 1024;
+  const MAX_TXT_FILE_SIZE = 20 * 1024 * 1024;
+  const MAX_EPUB_FILE_SIZE = 50 * 1024 * 1024;
+  const MAX_COVER_SIZE = 900 * 1024;
   const MAX_BLOCK_LENGTH = 1200;
   const PROGRESS_SAVE_DELAY = 1100;
   const PROGRESS_INTERVAL = 15000;
@@ -29,6 +31,7 @@
     progressInterval: null,
     restoring: false,
     search: { term: "", matches: [], index: -1 },
+    toc: [],
     wakeLock: null,
     layoutTimer: null,
     pendingLayoutPosition: null,
@@ -267,7 +270,7 @@
   function renderLibrary(documents, progressMap) {
     const list = $("document-list");
     list.innerHTML = "";
-    $("document-count").textContent = `${documents.length}개`;
+    $("document-count").textContent = `${documents.length}권`;
     $("empty-library").classList.toggle("hidden", documents.length > 0);
 
     for (const doc of documents) {
@@ -275,18 +278,48 @@
       const localProgress = getLocalProgress(doc.id);
       const progress = newerProgress(remoteProgress, localProgress);
       const percent = clamp(Number(progress?.progress_percent || 0), 0, 100);
+      const fileType = String(doc.file_type || (doc.original_filename?.toLowerCase().endsWith(".epub") ? "epub" : "txt")).toUpperCase();
 
       const card = document.createElement("article");
       card.className = "document-card";
 
+      const header = document.createElement("div");
+      header.className = "document-card-header";
+      const cover = document.createElement("div");
+      cover.className = "document-cover";
+      if (doc.cover_data_url) {
+        const image = document.createElement("img");
+        image.src = doc.cover_data_url;
+        image.alt = `${doc.title} 표지`;
+        image.loading = "lazy";
+        cover.append(image);
+      } else {
+        cover.textContent = fileType;
+        cover.setAttribute("aria-hidden", "true");
+      }
+
+      const heading = document.createElement("div");
+      heading.className = "document-heading";
+      const badge = document.createElement("span");
+      badge.className = `file-type-badge ${fileType.toLowerCase()}`;
+      badge.textContent = fileType;
       const title = document.createElement("h3");
       title.textContent = doc.title;
+      heading.append(badge, title);
+      if (doc.author) {
+        const author = document.createElement("p");
+        author.className = "document-author";
+        author.textContent = doc.author;
+        heading.append(author);
+      }
+      header.append(cover, heading);
 
       const meta = document.createElement("div");
       meta.className = "document-meta";
+      const chapterCount = Array.isArray(doc.toc) ? doc.toc.length : 0;
       meta.innerHTML = `
-        <span>${escapeHtml(doc.original_filename || "TXT 문서")}</span>
-        <span>${Number(doc.total_characters || 0).toLocaleString()}자 · ${Number(doc.total_blocks || 0).toLocaleString()}문단</span>
+        <span>${escapeHtml(doc.original_filename || `${fileType} 문서`)}</span>
+        <span>${Number(doc.total_characters || 0).toLocaleString()}자 · ${Number(doc.total_blocks || 0).toLocaleString()}문단${chapterCount ? ` · 목차 ${chapterCount.toLocaleString()}개` : ""}</span>
         <span>최근 읽음 ${formatDate(progress?.updated_at || progress?.updatedAt)}</span>
       `;
 
@@ -314,7 +347,7 @@
       deleteButton.addEventListener("click", () => deleteDocument(doc));
 
       actions.append(readButton, deleteButton);
-      card.append(title, meta, progressTrack, percentLabel, actions);
+      card.append(header, meta, progressTrack, percentLabel, actions);
       list.append(card);
     }
   }
@@ -352,19 +385,22 @@
     const status = $("upload-status");
 
     if (!file) {
-      status.textContent = "TXT 파일을 선택해 주세요.";
+      status.textContent = "TXT 또는 EPUB 파일을 선택해 주세요.";
       return;
     }
     if (!navigator.onLine) {
       status.textContent = "문서 등록은 인터넷에 연결된 상태에서 가능합니다.";
       return;
     }
-    if (!/\.txt$/i.test(file.name)) {
-      status.textContent = "확장자가 .txt인 파일만 등록할 수 있습니다.";
+
+    const fileType = getFileType(file);
+    if (!fileType) {
+      status.textContent = "확장자가 .txt 또는 .epub인 파일만 등록할 수 있습니다.";
       return;
     }
-    if (file.size > MAX_FILE_SIZE) {
-      status.textContent = `파일 크기는 ${formatBytes(MAX_FILE_SIZE)} 이하만 가능합니다.`;
+    const maxSize = fileType === "epub" ? MAX_EPUB_FILE_SIZE : MAX_TXT_FILE_SIZE;
+    if (file.size > maxSize) {
+      status.textContent = `${fileType.toUpperCase()} 파일 크기는 ${formatBytes(maxSize)} 이하만 가능합니다.`;
       return;
     }
 
@@ -374,12 +410,33 @@
 
     try {
       const buffer = await file.arrayBuffer();
-      const { text, encoding } = decodeText(buffer, $("encoding-select").value);
-      const normalized = normalizeText(text);
-      if (!normalized.trim()) throw new Error("내용이 없는 TXT 파일입니다.");
+      let parsed;
+      if (fileType === "epub") {
+        parsed = await parseEpub(buffer, file.name, (message) => { status.textContent = message; });
+      } else {
+        const { text, encoding } = decodeText(buffer, $("encoding-select").value);
+        const normalized = normalizeText(text);
+        if (!normalized.trim()) throw new Error("내용이 없는 TXT 파일입니다.");
+        const blocks = splitIntoBlocks(normalized, MAX_BLOCK_LENGTH).map((block) => ({
+          ...block,
+          chapter_index: 0,
+          chapter_title: null,
+          source_href: null,
+          block_kind: "paragraph",
+        }));
+        parsed = {
+          title: file.name.replace(/\.txt$/i, ""),
+          author: null,
+          encoding,
+          coverDataUrl: null,
+          toc: [],
+          blocks,
+          hashSource: normalized,
+        };
+      }
 
-      status.textContent = "문서를 분석하는 중입니다.";
-      const hash = await sha256(normalized);
+      status.textContent = "중복 문서를 확인하는 중입니다.";
+      const hash = fileType === "epub" ? await sha256Buffer(buffer) : await sha256(parsed.hashSource);
       const { data: duplicate } = await state.client
         .from("documents")
         .select("id,title")
@@ -387,25 +444,44 @@
         .maybeSingle();
       if (duplicate) throw new Error(`같은 내용의 문서가 이미 등록되어 있습니다: ${duplicate.title}`);
 
-      const blocks = splitIntoBlocks(normalized, MAX_BLOCK_LENGTH);
-      const title = $("title-input").value.trim() || file.name.replace(/\.txt$/i, "") || "제목 없는 문서";
+      const blocks = parsed.blocks;
+      if (!blocks.length) throw new Error("읽을 수 있는 본문을 찾지 못했습니다.");
+      const title = ($("title-input").value.trim() || parsed.title || file.name.replace(/\.(txt|epub)$/i, "") || "제목 없는 문서").slice(0, 120);
       const totalCharacters = blocks.reduce((sum, block) => sum + block.content.length, 0);
+      const toc = (parsed.toc || []).map((entry) => ({
+        title: entry.title,
+        depth: Number(entry.depth || 0),
+        href: entry.href || null,
+        chapter_index: Number(entry.chapter_index || 0),
+        block_index: Number(entry.block_index || 0),
+      }));
+
+      const documentPayload = {
+        user_id: state.user.id,
+        title,
+        original_filename: file.name,
+        encoding: parsed.encoding || "utf-8",
+        content_hash: hash,
+        file_size: file.size,
+        total_characters: totalCharacters,
+        total_blocks: blocks.length,
+        file_type: fileType,
+        author: parsed.author || null,
+        cover_data_url: parsed.coverDataUrl || null,
+        toc,
+      };
 
       const { data: inserted, error: documentError } = await state.client
         .from("documents")
-        .insert({
-          user_id: state.user.id,
-          title,
-          original_filename: file.name,
-          encoding,
-          content_hash: hash,
-          file_size: file.size,
-          total_characters: totalCharacters,
-          total_blocks: blocks.length,
-        })
+        .insert(documentPayload)
         .select()
         .single();
-      if (documentError) throw documentError;
+      if (documentError) {
+        if (/file_type|author|cover_data_url|toc|schema cache|PGRST204/i.test(documentError.message || "")) {
+          throw new Error("EPUB용 데이터베이스 항목이 없습니다. Supabase SQL Editor에서 supabase/migration_v3_epub.sql을 먼저 실행해 주세요.");
+        }
+        throw documentError;
+      }
       insertedDocumentId = inserted.id;
 
       let charStart = 0;
@@ -416,6 +492,10 @@
           block_index: index,
           char_start: charStart,
           content: block.content,
+          chapter_index: Number(block.chapter_index || 0),
+          chapter_title: block.chapter_title || null,
+          source_href: block.source_href || null,
+          block_kind: block.block_kind || "paragraph",
         };
         charStart += block.content.length;
         return row;
@@ -423,17 +503,25 @@
 
       for (let start = 0; start < rows.length; start += 150) {
         const end = Math.min(start + 150, rows.length);
-        status.textContent = `문단 저장 중 ${end.toLocaleString()} / ${rows.length.toLocaleString()}`;
+        status.textContent = `본문 저장 중 ${end.toLocaleString()} / ${rows.length.toLocaleString()}`;
         const { error } = await state.client.from("document_blocks").insert(rows.slice(start, end));
-        if (error) throw error;
+        if (error) {
+          if (/chapter_index|chapter_title|source_href|block_kind|schema cache|PGRST204/i.test(error.message || "")) {
+            throw new Error("EPUB용 데이터베이스 항목이 없습니다. Supabase SQL Editor에서 supabase/migration_v3_epub.sql을 먼저 실행해 주세요.");
+          }
+          throw error;
+        }
       }
 
       await idbPut("documents", { id: inserted.id, document: inserted, blocks: rows, cachedAt: new Date().toISOString() });
       await pruneDocumentCache();
-      status.textContent = `등록 완료: ${blocks.length.toLocaleString()}개 문단`;
+      status.textContent = `등록 완료: ${blocks.length.toLocaleString()}개 문단${toc.length ? ` · 목차 ${toc.length.toLocaleString()}개` : ""}`;
       $("upload-form").reset();
-      $("file-name-label").textContent = "TXT 파일 선택";
-      showToast("TXT 문서를 등록했습니다.");
+      $("file-name-label").textContent = "TXT 또는 EPUB 파일 선택";
+      $("encoding-field").classList.remove("field-disabled");
+      $("encoding-select").disabled = false;
+      $("title-input").placeholder = "파일명으로 자동 입력";
+      showToast(`${fileType.toUpperCase()} 문서를 등록했습니다.`);
       await loadLibrary();
     } catch (error) {
       console.error(error);
@@ -442,6 +530,333 @@
     } finally {
       setBusy(button, false, "처리 중", "등록");
     }
+  }
+
+  function getFileType(file) {
+    const name = String(file?.name || "").toLowerCase();
+    if (name.endsWith(".epub") || file?.type === "application/epub+zip") return "epub";
+    if (name.endsWith(".txt") || file?.type === "text/plain") return "txt";
+    return null;
+  }
+
+  function updateSelectedFileUi(file) {
+    const type = getFileType(file);
+    $("file-name-label").textContent = file ? `${file.name} · ${formatBytes(file.size)}` : "TXT 또는 EPUB 파일 선택";
+    const epub = type === "epub";
+    if (file && !$("title-input").value && !epub) $("title-input").value = file.name.replace(/\.txt$/i, "");
+    $("title-input").placeholder = epub ? "EPUB 내부 제목으로 자동 입력" : "파일명으로 자동 입력";
+    $("encoding-select").disabled = epub;
+    $("encoding-field").classList.toggle("field-disabled", epub);
+  }
+
+  async function parseEpub(buffer, fileName, report = () => {}) {
+    if (!window.JSZip) throw new Error("EPUB 압축 해제 모듈을 불러오지 못했습니다. 페이지를 새로고침해 주세요.");
+    report("EPUB 구조를 확인하는 중입니다.");
+    let zip;
+    try {
+      zip = await window.JSZip.loadAsync(buffer);
+    } catch {
+      throw new Error("올바른 EPUB 파일이 아니거나 파일이 손상되었습니다.");
+    }
+
+    await assertEpubIsReadable(zip);
+    const containerEntry = findZipEntry(zip, "META-INF/container.xml");
+    if (!containerEntry) throw new Error("EPUB 필수 파일(META-INF/container.xml)을 찾지 못했습니다.");
+    const containerDoc = parseXml(await containerEntry.async("text"), "EPUB container.xml");
+    const rootfile = [...containerDoc.getElementsByTagNameNS("*", "rootfile")][0];
+    const opfPath = normalizeZipPath(rootfile?.getAttribute("full-path") || "");
+    if (!opfPath) throw new Error("EPUB 본문 정보 파일의 위치를 찾지 못했습니다.");
+    const opfEntry = findZipEntry(zip, opfPath);
+    if (!opfEntry) throw new Error("EPUB 본문 정보 파일을 찾지 못했습니다.");
+
+    const opfDoc = parseXml(await opfEntry.async("text"), "EPUB OPF");
+    const title = firstXmlText(opfDoc, "title") || fileName.replace(/\.epub$/i, "");
+    const author = firstXmlText(opfDoc, "creator") || null;
+    const language = firstXmlText(opfDoc, "language") || "ko";
+
+    const manifest = new Map();
+    for (const item of [...opfDoc.getElementsByTagNameNS("*", "item")]) {
+      const id = item.getAttribute("id");
+      if (!id) continue;
+      manifest.set(id, {
+        id,
+        href: item.getAttribute("href") || "",
+        path: resolveZipPath(opfPath, item.getAttribute("href") || ""),
+        mediaType: item.getAttribute("media-type") || "",
+        properties: item.getAttribute("properties") || "",
+      });
+    }
+
+    const spine = [...opfDoc.getElementsByTagNameNS("*", "itemref")]
+      .map((item) => manifest.get(item.getAttribute("idref")))
+      .filter(Boolean);
+    if (!spine.length) throw new Error("EPUB에서 읽을 본문 순서를 찾지 못했습니다.");
+
+    report("EPUB 목차를 분석하는 중입니다.");
+    const tocEntries = await readEpubToc(zip, opfDoc, opfPath, manifest);
+    const coverDataUrl = await readEpubCover(zip, opfDoc, manifest);
+    const blocks = [];
+    const chapters = [];
+
+    for (let chapterIndex = 0; chapterIndex < spine.length; chapterIndex += 1) {
+      const item = spine[chapterIndex];
+      report(`EPUB 본문 분석 중 ${chapterIndex + 1} / ${spine.length}`);
+      const entry = findZipEntry(zip, item.path);
+      if (!entry) continue;
+      let html;
+      try { html = await entry.async("text"); } catch { continue; }
+      const extracted = extractEpubHtmlBlocks(html);
+      if (!extracted.length) continue;
+
+      const tocMatch = tocEntries.find((tocItem) => sameEpubResource(tocItem.resolvedHref, item.path));
+      const firstHeading = extracted.find((block) => block.kind === "heading")?.content;
+      const chapterTitle = tocMatch?.title || firstHeading || `제${chapters.length + 1}장`;
+      const chapterStart = blocks.length;
+      const firstText = extracted[0]?.content || "";
+      if (chapterTitle && normalizeComparableText(firstText) !== normalizeComparableText(chapterTitle)) {
+        blocks.push({
+          content: chapterTitle,
+          chapter_index: chapters.length,
+          chapter_title: chapterTitle,
+          source_href: item.path,
+          block_kind: "chapter",
+        });
+      }
+
+      for (const sourceBlock of extracted) {
+        const pieces = splitLongContent(sourceBlock.content, MAX_BLOCK_LENGTH);
+        for (const piece of pieces) {
+          blocks.push({
+            content: piece,
+            chapter_index: chapters.length,
+            chapter_title: chapterTitle,
+            source_href: item.path,
+            block_kind: sourceBlock.kind === "heading" ? "heading" : "paragraph",
+          });
+        }
+      }
+      chapters.push({ title: chapterTitle, href: item.path, block_index: chapterStart, chapter_index: chapters.length });
+    }
+
+    if (!blocks.length) throw new Error("EPUB에서 읽을 수 있는 본문을 추출하지 못했습니다.");
+    const toc = buildStoredToc(tocEntries, chapters);
+    return {
+      title,
+      author,
+      language,
+      encoding: "utf-8",
+      coverDataUrl,
+      toc,
+      blocks,
+    };
+  }
+
+  async function assertEpubIsReadable(zip) {
+    const rights = findZipEntry(zip, "META-INF/rights.xml");
+    const encryption = findZipEntry(zip, "META-INF/encryption.xml");
+    if (rights && !encryption) throw new Error("DRM이 적용된 EPUB은 열 수 없습니다.");
+    if (!encryption) return;
+    const doc = parseXml(await encryption.async("text"), "EPUB encryption.xml");
+    const methods = [...doc.getElementsByTagNameNS("*", "EncryptionMethod")]
+      .map((item) => item.getAttribute("Algorithm") || "")
+      .filter(Boolean);
+    const fontOnly = methods.every((value) => /idpf\.org\/2008\/embedding|ns\.adobe\.com\/pdf\/enc/i.test(value));
+    if (!fontOnly) throw new Error("DRM 또는 암호화가 적용된 EPUB은 열 수 없습니다.");
+  }
+
+  async function readEpubToc(zip, opfDoc, opfPath, manifest) {
+    const navItem = [...manifest.values()].find((item) => item.properties.split(/\s+/).includes("nav"));
+    if (navItem) {
+      const entry = findZipEntry(zip, navItem.path);
+      if (entry) {
+        const doc = parseHtml(await entry.async("text"));
+        const navs = [...doc.querySelectorAll("nav")];
+        const tocNav = navs.find((node) => {
+          const type = node.getAttribute("epub:type") || node.getAttributeNS("http://www.idpf.org/2007/ops", "type") || node.getAttribute("role") || "";
+          return /(^|\s)(toc|doc-toc)(\s|$)/i.test(type);
+        }) || navs[0];
+        if (tocNav) {
+          return [...tocNav.querySelectorAll("a[href]")].map((anchor) => ({
+            title: normalizeInlineText(anchor.textContent) || "목차",
+            href: anchor.getAttribute("href") || "",
+            resolvedHref: resolveZipPath(navItem.path, anchor.getAttribute("href") || ""),
+            depth: Math.max(0, countAncestorLists(anchor, tocNav) - 1),
+          }));
+        }
+      }
+    }
+
+    const spineElement = [...opfDoc.getElementsByTagNameNS("*", "spine")][0];
+    const tocId = spineElement?.getAttribute("toc");
+    const ncxItem = (tocId && manifest.get(tocId)) || [...manifest.values()].find((item) => item.mediaType === "application/x-dtbncx+xml");
+    if (!ncxItem) return [];
+    const entry = findZipEntry(zip, ncxItem.path);
+    if (!entry) return [];
+    const doc = parseXml(await entry.async("text"), "EPUB NCX");
+    const results = [];
+    const walk = (node, depth) => {
+      for (const point of [...node.children].filter((child) => child.localName === "navPoint")) {
+        const label = [...point.getElementsByTagNameNS("*", "navLabel")][0];
+        const text = label ? firstXmlText(label, "text") : "목차";
+        const content = [...point.getElementsByTagNameNS("*", "content")][0];
+        const href = content?.getAttribute("src") || "";
+        results.push({ title: text || "목차", href, resolvedHref: resolveZipPath(ncxItem.path, href), depth });
+        walk(point, depth + 1);
+      }
+    };
+    const navMap = [...doc.getElementsByTagNameNS("*", "navMap")][0] || doc.documentElement;
+    walk(navMap, 0);
+    return results;
+  }
+
+  async function readEpubCover(zip, opfDoc, manifest) {
+    let coverItem = [...manifest.values()].find((item) => item.properties.split(/\s+/).includes("cover-image"));
+    if (!coverItem) {
+      const coverMeta = [...opfDoc.getElementsByTagNameNS("*", "meta")].find((item) => (item.getAttribute("name") || "").toLowerCase() === "cover");
+      coverItem = coverMeta ? manifest.get(coverMeta.getAttribute("content")) : null;
+    }
+    if (!coverItem || !/^image\//i.test(coverItem.mediaType)) return null;
+    const entry = findZipEntry(zip, coverItem.path);
+    if (!entry) return null;
+    const bytes = await entry.async("uint8array");
+    if (bytes.byteLength > MAX_COVER_SIZE) return null;
+    const base64 = await entry.async("base64");
+    return `data:${coverItem.mediaType};base64,${base64}`;
+  }
+
+  function extractEpubHtmlBlocks(html) {
+    const doc = parseHtml(html);
+    doc.querySelectorAll("script,style,nav,svg,canvas,noscript,form").forEach((node) => node.remove());
+    const root = doc.body || doc.documentElement;
+    if (!root) return [];
+    const selector = "h1,h2,h3,h4,h5,h6,p,li,blockquote,pre,dt,dd,figcaption,caption,tr";
+    const selected = [...root.querySelectorAll(selector)];
+    const results = [];
+    for (const element of selected) {
+      if (element.parentElement?.closest(selector)) continue;
+      let text;
+      if (element.localName === "tr") {
+        text = [...element.querySelectorAll(":scope > th, :scope > td")].map((cell) => normalizeInlineText(cell.textContent)).filter(Boolean).join(" | ");
+      } else if (element.localName === "pre") {
+        text = String(element.textContent || "").replace(/\r\n?/g, "\n").trim();
+      } else {
+        text = normalizeInlineText(element.textContent);
+      }
+      if (!text || text.length < 1) continue;
+      results.push({ content: text, kind: /^h[1-6]$/.test(element.localName) ? "heading" : "paragraph" });
+    }
+    if (results.length) return removeRepeatedBlocks(results);
+    const fallback = normalizeText(root.textContent || "");
+    return splitIntoBlocks(fallback, MAX_BLOCK_LENGTH).map((block) => ({ content: block.content, kind: "paragraph" }));
+  }
+
+  function removeRepeatedBlocks(blocks) {
+    const results = [];
+    for (const block of blocks) {
+      const previous = results.at(-1);
+      if (previous && normalizeComparableText(previous.content) === normalizeComparableText(block.content)) continue;
+      results.push(block);
+    }
+    return results;
+  }
+
+  function splitLongContent(content, maxLength) {
+    const normalized = String(content || "").trim();
+    if (!normalized) return [];
+    if (normalized.length <= maxLength) return [normalized];
+    return splitIntoBlocks(normalized, maxLength).map((block) => block.content);
+  }
+
+  function buildStoredToc(tocEntries, chapters) {
+    if (!chapters.length) return [];
+    const mapped = [];
+    for (const entry of tocEntries) {
+      const chapter = chapters.find((item) => sameEpubResource(entry.resolvedHref, item.href));
+      if (!chapter) continue;
+      mapped.push({
+        title: entry.title || chapter.title,
+        depth: Number(entry.depth || 0),
+        href: entry.resolvedHref || chapter.href,
+        chapter_index: chapter.chapter_index,
+        block_index: chapter.block_index,
+      });
+    }
+    if (mapped.length) return mapped.filter((item, index, all) => index === all.findIndex((candidate) => candidate.block_index === item.block_index && candidate.title === item.title));
+    return chapters.map((chapter) => ({ ...chapter, depth: 0 }));
+  }
+
+  function parseXml(text, label) {
+    const doc = new DOMParser().parseFromString(String(text || ""), "application/xml");
+    if (doc.getElementsByTagName("parsererror").length) throw new Error(`${label}을 해석하지 못했습니다.`);
+    return doc;
+  }
+
+  function parseHtml(text) {
+    return new DOMParser().parseFromString(String(text || ""), "text/html");
+  }
+
+  function firstXmlText(node, localName) {
+    const target = [...node.getElementsByTagNameNS("*", localName)][0];
+    return normalizeInlineText(target?.textContent || "");
+  }
+
+  function normalizeInlineText(value) {
+    return String(value || "").replace(/[\u00a0\t\r\n ]+/g, " ").trim();
+  }
+
+  function normalizeComparableText(value) {
+    return normalizeInlineText(value).replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase();
+  }
+
+  function normalizeZipPath(value) {
+    const raw = String(value || "").split("#")[0].split("?")[0].replace(/\\/g, "/");
+    let decoded = raw;
+    try { decoded = decodeURIComponent(raw); } catch { decoded = raw; }
+    const parts = [];
+    for (const part of decoded.split("/")) {
+      if (!part || part === ".") continue;
+      if (part === "..") parts.pop();
+      else parts.push(part);
+    }
+    return parts.join("/");
+  }
+
+  function resolveZipPath(baseFile, relative) {
+    const value = String(relative || "");
+    if (!value) return "";
+    if (value.startsWith("/")) return normalizeZipPath(value);
+    const base = normalizeZipPath(baseFile);
+    const directory = base.includes("/") ? base.slice(0, base.lastIndexOf("/") + 1) : "";
+    return normalizeZipPath(directory + value);
+  }
+
+  function findZipEntry(zip, path) {
+    const normalized = normalizeZipPath(path);
+    if (!normalized) return null;
+    const direct = zip.file(normalized);
+    if (direct) return direct;
+    const lower = normalized.toLowerCase();
+    const key = Object.keys(zip.files).find((name) => normalizeZipPath(name).toLowerCase() === lower);
+    return key ? zip.file(key) : null;
+  }
+
+  function sameEpubResource(a, b) {
+    return normalizeZipPath(a).toLowerCase() === normalizeZipPath(b).toLowerCase();
+  }
+
+  function countAncestorLists(node, root) {
+    let depth = 0;
+    let current = node.parentElement;
+    while (current && current !== root) {
+      if (current.localName === "ol" || current.localName === "ul") depth += 1;
+      current = current.parentElement;
+    }
+    return depth;
+  }
+
+  async function sha256Buffer(buffer) {
+    const digest = await crypto.subtle.digest("SHA-256", buffer);
+    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
   }
 
   function decodeText(buffer, selectedEncoding) {
@@ -518,6 +933,31 @@
     return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
   }
 
+  async function fetchDocumentBlocks(documentId) {
+    let result = await state.client
+      .from("document_blocks")
+      .select("block_index,char_start,content,chapter_index,chapter_title,source_href,block_kind")
+      .eq("document_id", documentId)
+      .order("block_index");
+    if (result.error && /chapter_index|chapter_title|source_href|block_kind|schema cache|PGRST204/i.test(result.error.message || "")) {
+      result = await state.client
+        .from("document_blocks")
+        .select("block_index,char_start,content")
+        .eq("document_id", documentId)
+        .order("block_index");
+      if (!result.error) {
+        result.data = (result.data || []).map((block) => ({
+          ...block,
+          chapter_index: 0,
+          chapter_title: null,
+          source_href: null,
+          block_kind: "paragraph",
+        }));
+      }
+    }
+    return result;
+  }
+
   async function openReader(documentId) {
     if (state.currentDocument?.id === documentId && state.blocks.length) return;
     cleanupReader();
@@ -533,7 +973,7 @@
     if (navigator.onLine) {
       const [documentResult, blocksResult] = await Promise.all([
         state.client.from("documents").select("*").eq("id", documentId).single(),
-        state.client.from("document_blocks").select("block_index,char_start,content").eq("document_id", documentId).order("block_index"),
+        fetchDocumentBlocks(documentId),
       ]);
       if (!documentResult.error && !blocksResult.error) {
         documentRow = documentResult.data;
@@ -560,8 +1000,10 @@
 
     state.currentDocument = documentRow;
     state.blocks = blocks;
+    state.toc = Array.isArray(documentRow.toc) ? documentRow.toc : [];
     $("reader-title").textContent = documentRow.title;
     renderReaderBlocks(blocks);
+    renderReaderToc();
     $("reader-loading").classList.add("hidden");
 
     await loadSettings();
@@ -581,14 +1023,67 @@
   function renderReaderBlocks(blocks) {
     const fragment = document.createDocumentFragment();
     for (const block of blocks) {
-      const p = document.createElement("p");
-      p.id = `block-${block.block_index}`;
-      p.className = "reader-block";
-      p.dataset.blockIndex = String(block.block_index);
-      p.textContent = block.content;
-      fragment.append(p);
+      const isChapter = block.block_kind === "chapter";
+      const isHeading = block.block_kind === "heading";
+      const element = document.createElement(isChapter ? "h2" : (isHeading ? "h3" : "p"));
+      element.id = `block-${block.block_index}`;
+      element.className = `reader-block${isChapter ? " reader-chapter-title" : ""}${isHeading ? " reader-section-heading" : ""}`;
+      element.dataset.blockIndex = String(block.block_index);
+      element.dataset.chapterIndex = String(block.chapter_index || 0);
+      element.textContent = block.content;
+      fragment.append(element);
     }
     $("reader-content").replaceChildren(fragment);
+  }
+
+  function renderReaderToc() {
+    const list = $("reader-toc-list");
+    list.replaceChildren();
+    const documentRow = state.currentDocument || {};
+    const author = documentRow.author ? ` · ${documentRow.author}` : "";
+    $("reader-book-meta").textContent = `${String(documentRow.file_type || "txt").toUpperCase()}${author}`;
+
+    let entries = Array.isArray(state.toc) ? state.toc : [];
+    if (!entries.length) {
+      const seen = new Set();
+      entries = state.blocks.filter((block) => {
+        const key = Number(block.chapter_index || 0);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return Boolean(block.chapter_title);
+      }).map((block) => ({
+        title: block.chapter_title,
+        depth: 0,
+        chapter_index: Number(block.chapter_index || 0),
+        block_index: Number(block.block_index || 0),
+      }));
+    }
+
+    $("reader-toc-empty").classList.toggle("hidden", entries.length > 0);
+    $("reader-toc-button").classList.toggle("hidden", entries.length === 0);
+    for (const entry of entries) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "toc-entry";
+      button.style.setProperty("--toc-depth", String(clamp(Number(entry.depth || 0), 0, 5)));
+      button.textContent = entry.title || "목차";
+      button.addEventListener("click", () => navigateToBlock(Number(entry.block_index || 0)));
+      list.append(button);
+    }
+  }
+
+  async function navigateToBlock(blockIndex) {
+    const index = clamp(Number(blockIndex || 0), 0, Math.max(0, state.blocks.length - 1));
+    const element = $(`block-${index}`);
+    if (!element) return;
+    $("reader-toc-panel").classList.add("hidden");
+    element.scrollIntoView({ block: "start", behavior: "smooth" });
+    const position = buildPosition(element, 0);
+    state.progress = position;
+    setLocalProgress(position);
+    updateProgressDisplay(position.progress_percent);
+    if (state.speech.active) setSpeechPosition(index, 0, !state.speech.paused);
+    await saveProgress(true, position);
   }
 
   async function loadBestProgress(documentId) {
@@ -839,8 +1334,10 @@
     state.blocks = [];
     state.progress = null;
     state.search = { term: "", matches: [], index: -1 };
+    state.toc = [];
     delete document.body.dataset.readerTheme;
     $("reader-settings-panel").classList.add("hidden");
+    $("reader-toc-panel").classList.add("hidden");
   }
 
   async function loadSettings() {
@@ -1097,7 +1594,9 @@
       $("tts-status-detail").textContent = detail;
     } else if (state.currentDocument) {
       const percent = getSpeechPosition()?.progress_percent || state.progress?.progress_percent || 0;
-      $("tts-status-detail").textContent = `${Number(percent).toFixed(percent >= 10 ? 0 : 1)}% · ${Number(state.settings?.tts_rate || 1).toFixed(1)}배`;
+      const currentBlock = state.blocks[state.speech.blockIndex];
+      const chapter = currentBlock?.chapter_title ? `${currentBlock.chapter_title} · ` : "";
+      $("tts-status-detail").textContent = `${chapter}${Number(percent).toFixed(percent >= 10 ? 0 : 1)}% · ${Number(state.settings?.tts_rate || 1).toFixed(1)}배`;
     }
     if ("mediaSession" in navigator) {
       navigator.mediaSession.playbackState = state.speech.active
@@ -1143,13 +1642,15 @@
     if (!("mediaSession" in navigator) || !("MediaMetadata" in window) || !state.currentDocument) return;
     try {
       navigator.mediaSession.metadata = new MediaMetadata({
-        title: state.currentDocument.title || "TXT 문서",
-        artist: "이어읽기 음성 책읽기",
-        album: "개인용 TXT 뷰어",
-        artwork: [
-          { src: new URL("./icons/icon-192.png", location.href).href, sizes: "192x192", type: "image/png" },
-          { src: new URL("./icons/icon-512.png", location.href).href, sizes: "512x512", type: "image/png" },
-        ],
+        title: state.currentDocument.title || "문서",
+        artist: state.currentDocument.author || "이어읽기 음성 책읽기",
+        album: `${String(state.currentDocument.file_type || "txt").toUpperCase()} 개인 서재`,
+        artwork: state.currentDocument.cover_data_url
+          ? [{ src: state.currentDocument.cover_data_url }]
+          : [
+              { src: new URL("./icons/icon-192.png", location.href).href, sizes: "192x192", type: "image/png" },
+              { src: new URL("./icons/icon-512.png", location.href).href, sizes: "512x512", type: "image/png" },
+            ],
       });
     } catch { /* metadata is optional */ }
   }
@@ -1434,18 +1935,22 @@
     $("logout-button").addEventListener("click", logout);
     $("upload-form").addEventListener("submit", uploadDocument);
     $("refresh-library-button").addEventListener("click", loadLibrary);
-    $("file-input").addEventListener("change", (event) => {
-      const file = event.target.files?.[0];
-      $("file-name-label").textContent = file ? `${file.name} · ${formatBytes(file.size)}` : "TXT 파일 선택";
-      if (file && !$("title-input").value) $("title-input").value = file.name.replace(/\.txt$/i, "");
-    });
+    $("file-input").addEventListener("change", (event) => updateSelectedFileUi(event.target.files?.[0]));
 
     $("back-button").addEventListener("click", async () => {
       await saveProgress(true);
       location.hash = "#/library";
     });
-    $("reader-menu-button").addEventListener("click", () => $("reader-settings-panel").classList.toggle("hidden"));
+    $("reader-menu-button").addEventListener("click", () => {
+      $("reader-toc-panel").classList.add("hidden");
+      $("reader-settings-panel").classList.toggle("hidden");
+    });
+    $("reader-toc-button").addEventListener("click", () => {
+      $("reader-settings-panel").classList.add("hidden");
+      $("reader-toc-panel").classList.toggle("hidden");
+    });
     $("close-settings-button").addEventListener("click", () => $("reader-settings-panel").classList.add("hidden"));
+    $("close-toc-button").addEventListener("click", () => $("reader-toc-panel").classList.add("hidden"));
     $("font-size-range").addEventListener("input", (event) => changeSetting("font_size", Number(event.target.value)));
     $("line-height-range").addEventListener("input", (event) => changeSetting("line_height", Number(event.target.value)));
     $("content-width-select").addEventListener("change", (event) => changeSetting("content_width", Number(event.target.value)));

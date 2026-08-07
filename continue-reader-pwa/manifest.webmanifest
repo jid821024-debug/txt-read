@@ -1,7 +1,7 @@
 {
-  "name": "이어읽기 음성 책읽기",
+  "name": "이어읽기 TXT·EPUB 음성 책읽기",
   "short_name": "이어읽기",
-  "description": "TXT 문서를 이어 읽고 기기 내장 음성으로 듣는 개인용 PWA",
+  "description": "TXT와 EPUB을 이어 읽고 기기 내장 음성으로 듣는 개인용 PWA",
   "lang": "ko-KR",
   "start_url": "./#/library",
   "scope": "./",

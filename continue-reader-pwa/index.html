@@ -4,12 +4,12 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#111827" />
-  <meta name="description" content="PC, 모바일, 태블릿에서 TXT를 이어 읽고 음성으로 듣는 개인용 PWA" />
+  <meta name="description" content="PC, 모바일, 태블릿에서 TXT와 EPUB을 이어 읽고 음성으로 듣는 개인용 PWA" />
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="icon" href="./icons/icon-192.png" />
   <link rel="apple-touch-icon" href="./icons/icon-192.png" />
   <link rel="stylesheet" href="./styles.css" />
-  <title>이어읽기 · 음성 책읽기</title>
+  <title>이어읽기 · TXT·EPUB 음성 책읽기</title>
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -48,7 +48,7 @@
     <section id="library-screen" class="screen hidden">
       <header class="topbar">
         <div>
-          <h1>내 텍스트</h1>
+          <h1>내 서재</h1>
           <p id="account-label" class="muted small"></p>
         </div>
         <div class="topbar-actions">
@@ -61,21 +61,21 @@
         <section class="upload-card panel" aria-labelledby="upload-title">
           <div class="section-heading">
             <div>
-              <h2 id="upload-title">TXT 파일 추가</h2>
-              <p class="muted">UTF-8, EUC-KR, CP949 형식을 지원합니다.</p>
+              <h2 id="upload-title">TXT·EPUB 파일 추가</h2>
+              <p class="muted">TXT는 UTF-8·EUC-KR·CP949, EPUB은 DRM 없는 일반 파일을 지원합니다.</p>
             </div>
           </div>
           <form id="upload-form" class="upload-grid">
             <label class="file-picker">
-              <span id="file-name-label">TXT 파일 선택</span>
-              <input id="file-input" type="file" accept=".txt,text/plain" required />
+              <span id="file-name-label">TXT 또는 EPUB 파일 선택</span>
+              <input id="file-input" type="file" accept=".txt,.epub,text/plain,application/epub+zip" required />
             </label>
             <label>
               <span>문서 제목</span>
               <input id="title-input" type="text" maxlength="120" placeholder="파일명으로 자동 입력" />
             </label>
-            <label>
-              <span>파일 인코딩</span>
+            <label id="encoding-field">
+              <span>TXT 파일 인코딩</span>
               <select id="encoding-select">
                 <option value="auto">자동 감지</option>
                 <option value="utf-8">UTF-8</option>
@@ -98,7 +98,7 @@
           <div id="document-list" class="document-grid"></div>
           <div id="empty-library" class="empty-state hidden">
             <strong>등록된 문서가 없습니다.</strong>
-            <span>위에서 TXT 파일을 추가해 주세요.</span>
+            <span>위에서 TXT 또는 EPUB 파일을 추가해 주세요.</span>
           </div>
         </section>
       </main>
@@ -112,12 +112,25 @@
             <strong id="reader-title">문서</strong>
             <span id="reader-sync-state" class="muted small">불러오는 중</span>
           </div>
+          <button id="reader-toc-button" class="icon-button reader-toc-button" type="button" aria-label="목차 열기">목차</button>
           <button id="reader-menu-button" class="icon-button" type="button" aria-label="읽기 설정 열기">Aa</button>
         </div>
         <div class="reader-progress-track" aria-hidden="true">
           <div id="reader-progress-bar" class="reader-progress-bar"></div>
         </div>
       </header>
+
+      <aside id="reader-toc-panel" class="reader-toc-panel hidden" aria-label="책 목차">
+        <div class="settings-header">
+          <div>
+            <strong>목차</strong>
+            <span id="reader-book-meta" class="muted small"></span>
+          </div>
+          <button id="close-toc-button" class="icon-button" type="button" aria-label="목차 닫기">×</button>
+        </div>
+        <nav id="reader-toc-list" class="reader-toc-list"></nav>
+        <div id="reader-toc-empty" class="reader-toc-empty hidden">이 문서에는 별도 목차가 없습니다.</div>
+      </aside>
 
       <aside id="reader-settings-panel" class="reader-settings-panel hidden" aria-label="읽기 설정">
         <div class="settings-header">
@@ -217,6 +230,7 @@
 
   <script src="./config.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.110.8"></script>
+  <script src="./vendor/jszip.min.js"></script>
   <script src="./app.js"></script>
 </body>
 </html>

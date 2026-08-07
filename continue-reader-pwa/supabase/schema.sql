@@ -1,4 +1,4 @@
--- 이어읽기 개인용 TXT 뷰어 데이터베이스
+-- 이어읽기 개인용 TXT·EPUB 뷰어 데이터베이스
 -- Supabase Dashboard > SQL Editor에서 전체 실행하세요.
 
 create extension if not exists pgcrypto;
@@ -25,6 +25,10 @@ create table if not exists public.documents (
   file_size bigint not null default 0 check (file_size >= 0),
   total_characters integer not null default 0 check (total_characters >= 0),
   total_blocks integer not null default 0 check (total_blocks >= 0),
+  file_type text not null default 'txt' check (file_type in ('txt', 'epub')),
+  author text,
+  cover_data_url text,
+  toc jsonb not null default '[]'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique (id, user_id),
@@ -37,6 +41,10 @@ create table if not exists public.document_blocks (
   block_index integer not null check (block_index >= 0),
   char_start integer not null default 0 check (char_start >= 0),
   content text not null,
+  chapter_index integer not null default 0 check (chapter_index >= 0),
+  chapter_title text,
+  source_href text,
+  block_kind text not null default 'paragraph' check (block_kind in ('paragraph', 'heading', 'chapter')),
   created_at timestamptz not null default now(),
   primary key (document_id, block_index),
   constraint document_blocks_document_owner_fk
@@ -44,6 +52,19 @@ create table if not exists public.document_blocks (
     references public.documents(id, user_id)
     on delete cascade
 );
+
+-- v1/v2에서 이 파일을 다시 실행해도 EPUB용 열이 추가됩니다.
+alter table public.documents
+  add column if not exists file_type text not null default 'txt',
+  add column if not exists author text,
+  add column if not exists cover_data_url text,
+  add column if not exists toc jsonb not null default '[]'::jsonb;
+
+alter table public.document_blocks
+  add column if not exists chapter_index integer not null default 0,
+  add column if not exists chapter_title text,
+  add column if not exists source_href text,
+  add column if not exists block_kind text not null default 'paragraph';
 
 create table if not exists public.reading_progress (
   user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
@@ -75,6 +96,9 @@ create index if not exists document_blocks_owner_document_idx
 
 create index if not exists documents_owner_updated_idx
   on public.documents(user_id, updated_at desc);
+
+create index if not exists document_blocks_chapter_idx
+  on public.document_blocks(user_id, document_id, chapter_index, block_index);
 
 drop trigger if exists documents_set_updated_at on public.documents;
 create trigger documents_set_updated_at
@@ -194,3 +218,5 @@ grant select, insert, update, delete on public.documents to authenticated;
 grant select, insert, update, delete on public.document_blocks to authenticated;
 grant select, insert, update, delete on public.reading_progress to authenticated;
 grant select, insert, update, delete on public.reader_settings to authenticated;
+
+notify pgrst, 'reload schema';

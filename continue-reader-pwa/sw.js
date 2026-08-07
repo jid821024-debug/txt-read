@@ -1,4 +1,4 @@
-const CACHE_NAME = "continue-reader-v2";
+const CACHE_NAME = "continue-reader-v3";
 const SUPABASE_SDK = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.110.8";
 const APP_SHELL = [
   "./",
@@ -8,6 +8,7 @@ const APP_SHELL = [
   "./config.js",
   "./manifest.webmanifest",
   "./audio/silence.wav",
+  "./vendor/jszip.min.js",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
   "./icons/maskable-512.png",
