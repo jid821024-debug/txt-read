@@ -4,12 +4,12 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#111827" />
-  <meta name="description" content="PC, 모바일, 태블릿에서 읽던 위치를 이어서 읽는 개인용 TXT 뷰어" />
+  <meta name="description" content="PC, 모바일, 태블릿에서 TXT를 이어 읽고 음성으로 듣는 개인용 PWA" />
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="icon" href="./icons/icon-192.png" />
   <link rel="apple-touch-icon" href="./icons/icon-192.png" />
   <link rel="stylesheet" href="./styles.css" />
-  <title>이어읽기</title>
+  <title>이어읽기 · 음성 책읽기</title>
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -155,6 +155,30 @@
           <span>읽는 동안 화면 켜기</span>
           <input id="wake-lock-toggle" type="checkbox" />
         </label>
+        <div class="settings-divider" aria-hidden="true"></div>
+        <div class="settings-subheading">
+          <strong>음성 읽기 설정</strong>
+          <span class="muted small">기기 내장 한국어 음성 사용</span>
+        </div>
+        <label>
+          <span>읽어줄 목소리</span>
+          <select id="tts-voice-select">
+            <option value="">기기 기본 한국어 음성</option>
+          </select>
+        </label>
+        <label class="range-row">
+          <span>읽기 속도 <b id="tts-rate-value">1.0배</b></span>
+          <input id="tts-rate-range" type="range" min="0.6" max="2" step="0.1" value="1" />
+        </label>
+        <label class="toggle-row">
+          <span>읽는 문단 자동 이동</span>
+          <input id="tts-auto-scroll-toggle" type="checkbox" checked />
+        </label>
+        <label class="toggle-row">
+          <span>화면 꺼짐 재생 보조</span>
+          <input id="tts-background-toggle" type="checkbox" checked />
+        </label>
+        <p class="settings-note">잠금화면 재생 보조와 미디어 버튼 제어는 Android Chrome/PWA에서 우선 동작합니다. iPhone·iPad는 운영체제 제한으로 음성이 멈출 수 있습니다.</p>
         <button id="fullscreen-button" class="secondary-button" type="button">전체 화면</button>
       </aside>
 
@@ -168,6 +192,24 @@
         <article id="reader-content" class="reader-content" aria-live="polite"></article>
         <div id="reader-loading" class="reader-loading">문서를 불러오는 중입니다.</div>
       </main>
+
+      <section id="tts-player" class="tts-player" aria-label="음성 책읽기 제어">
+        <div class="tts-player-status">
+          <strong id="tts-status-title">음성 읽기 준비</strong>
+          <span id="tts-status-detail">현재 보이는 위치부터 읽습니다.</span>
+        </div>
+        <div class="tts-controls">
+          <button id="tts-back-button" class="tts-skip-button" type="button" aria-label="약 15초 뒤로" title="약 15초 뒤로">−15</button>
+          <button id="tts-play-button" class="tts-play-button" type="button" aria-label="음성 읽기 시작">▶ 읽기</button>
+          <button id="tts-stop-button" class="tts-stop-button" type="button" aria-label="음성 읽기 정지">■ 정지</button>
+          <button id="tts-forward-button" class="tts-skip-button" type="button" aria-label="약 15초 앞으로" title="약 15초 앞으로">+15</button>
+        </div>
+        <label class="tts-inline-rate">
+          <span>속도 <b id="tts-inline-rate-value">1.0배</b></span>
+          <input id="tts-inline-rate-range" type="range" min="0.6" max="2" step="0.1" value="1" />
+        </label>
+      </section>
+      <audio id="tts-keepalive-audio" src="./audio/silence.wav" loop preload="auto" aria-hidden="true"></audio>
     </section>
   </div>
 

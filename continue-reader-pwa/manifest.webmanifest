@@ -1,7 +1,7 @@
 {
-  "name": "이어읽기 텍스트 뷰어",
+  "name": "이어읽기 음성 책읽기",
   "short_name": "이어읽기",
-  "description": "PC, 모바일, 태블릿에서 TXT 문서를 이어서 읽는 개인용 뷰어",
+  "description": "TXT 문서를 이어 읽고 기기 내장 음성으로 듣는 개인용 PWA",
   "lang": "ko-KR",
   "start_url": "./#/library",
   "scope": "./",

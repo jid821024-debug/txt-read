@@ -9,6 +9,8 @@
   const DEVICE_KEY = "continue-reader-device-id";
   const DB_NAME = "continue-reader-offline";
   const DB_VERSION = 1;
+  const SPEECH_CHUNK_LENGTH = 260;
+  const SPEECH_JUMP_CHARACTERS = 65;
 
   const $ = (id) => document.getElementById(id);
   const screens = ["config-screen", "login-screen", "library-screen", "reader-screen"];
@@ -32,6 +34,21 @@
     pendingLayoutPosition: null,
     installPrompt: null,
     toastTimer: null,
+    speechWatchdog: null,
+    speech: {
+      supported: "speechSynthesis" in window && "SpeechSynthesisUtterance" in window,
+      active: false,
+      paused: false,
+      blockIndex: 0,
+      offset: 0,
+      chunkStart: 0,
+      chunkEnd: 0,
+      utterance: null,
+      token: 0,
+      voices: [],
+      transitioning: false,
+      lastStartAt: 0,
+    },
   };
 
   const defaultSettings = {
@@ -40,6 +57,10 @@
     content_width: 760,
     theme: "system",
     screen_wake_lock: false,
+    tts_rate: 1,
+    tts_voice: "",
+    tts_auto_scroll: true,
+    tts_background_audio: true,
   };
 
   function showScreen(id) {
@@ -547,6 +568,7 @@
     const progress = await loadBestProgress(documentId);
     state.progress = progress;
     await restoreProgress(progress);
+    resetSpeechPosition(progress);
 
     window.addEventListener("scroll", scheduleProgressSave, { passive: true });
     document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -738,9 +760,9 @@
     };
   }
 
-  async function saveProgress(force) {
+  async function saveProgress(force, preferredPosition = null) {
     if (!state.currentDocument?.id || state.restoring) return;
-    const position = getCurrentPosition();
+    const position = preferredPosition || (state.speech.active ? getSpeechPosition() : getCurrentPosition());
     if (!position) return;
     state.progress = position;
     setLocalProgress(position);
@@ -783,16 +805,23 @@
   }
 
   function handleVisibilityChange() {
-    if (document.visibilityState === "hidden") saveProgress(true);
-    else if (state.settings?.screen_wake_lock) requestWakeLock();
+    if (document.visibilityState === "hidden") {
+      saveProgress(true);
+      return;
+    }
+    if (state.settings?.screen_wake_lock) requestWakeLock();
+    if (state.speech.active && !state.speech.paused && !window.speechSynthesis.speaking) {
+      setTimeout(() => speakCurrentChunk(), 120);
+    }
   }
 
   function handlePageHide() {
-    const position = getCurrentPosition();
+    const position = state.speech.active ? getSpeechPosition() : getCurrentPosition();
     if (position) setLocalProgress(position);
   }
 
   function cleanupReader() {
+    stopSpeech({ save: false, silent: true });
     window.removeEventListener("scroll", scheduleProgressSave);
     document.removeEventListener("visibilitychange", handleVisibilityChange);
     window.removeEventListener("pagehide", handlePageHide);
@@ -815,16 +844,17 @@
   }
 
   async function loadSettings() {
-    let settings = null;
+    let localSettings = null;
+    let remoteSettings = null;
+    try { localSettings = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null"); } catch { localSettings = null; }
     if (navigator.onLine) {
       const { data, error } = await state.client.from("reader_settings").select("*").maybeSingle();
-      if (!error) settings = data;
+      if (!error) remoteSettings = data;
     }
-    if (!settings) {
-      try { settings = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null"); } catch { settings = null; }
-    }
-    state.settings = { ...defaultSettings, ...(settings || {}) };
+    state.settings = { ...defaultSettings, ...(localSettings || {}), ...(remoteSettings || {}) };
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings));
     applySettings();
+    refreshSpeechVoices();
   }
 
   function applySettings() {
@@ -841,6 +871,13 @@
     $("content-width-select").value = String(settings.content_width);
     $("theme-select").value = settings.theme;
     $("wake-lock-toggle").checked = Boolean(settings.screen_wake_lock);
+    $("tts-rate-range").value = String(settings.tts_rate);
+    $("tts-inline-rate-range").value = String(settings.tts_rate);
+    $("tts-rate-value").textContent = `${Number(settings.tts_rate).toFixed(1)}배`;
+    $("tts-inline-rate-value").textContent = `${Number(settings.tts_rate).toFixed(1)}배`;
+    $("tts-auto-scroll-toggle").checked = Boolean(settings.tts_auto_scroll);
+    $("tts-background-toggle").checked = Boolean(settings.tts_background_audio);
+    if ($("tts-voice-select").options.length) $("tts-voice-select").value = settings.tts_voice || "";
 
     if (settings.screen_wake_lock) requestWakeLock();
     else releaseWakeLock();
@@ -857,6 +894,14 @@
     state.settings[key] = value;
     applySettings();
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings));
+
+    if (["tts_rate", "tts_voice"].includes(key) && state.speech.active && !state.speech.paused) {
+      restartSpeechAtCurrent();
+    }
+    if (key === "tts_background_audio") {
+      if (value && state.speech.active && !state.speech.paused) startKeepAliveAudio();
+      else if (!value) stopKeepAliveAudio();
+    }
     clearTimeout(state.settingsTimer);
     state.settingsTimer = setTimeout(saveSettings, 800);
 
@@ -900,6 +945,424 @@
     if (!state.wakeLock) return;
     try { await state.wakeLock.release(); } catch { /* noop */ }
     state.wakeLock = null;
+  }
+
+  function refreshSpeechVoices() {
+    if (!state.speech.supported) {
+      setSpeechUnsupported();
+      return;
+    }
+    state.speech.voices = window.speechSynthesis.getVoices() || [];
+    const select = $("tts-voice-select");
+    if (!select) return;
+    const selected = state.settings?.tts_voice || select.value || "";
+    const korean = state.speech.voices.filter((voice) => /^ko([-_]|$)/i.test(voice.lang || ""));
+    const others = state.speech.voices.filter((voice) => !/^ko([-_]|$)/i.test(voice.lang || ""));
+    const fragment = document.createDocumentFragment();
+    const defaultOption = document.createElement("option");
+    defaultOption.value = "";
+    defaultOption.textContent = "기기 기본 한국어 음성";
+    fragment.append(defaultOption);
+    for (const voice of [...korean, ...others]) {
+      const option = document.createElement("option");
+      option.value = voice.name;
+      option.textContent = `${voice.name} (${voice.lang || "언어 미표시"})${voice.default ? " · 기본" : ""}`;
+      fragment.append(option);
+    }
+    select.replaceChildren(fragment);
+    select.value = [...select.options].some((option) => option.value === selected) ? selected : "";
+  }
+
+  function setSpeechUnsupported() {
+    $("tts-play-button").disabled = true;
+    $("tts-stop-button").disabled = true;
+    $("tts-back-button").disabled = true;
+    $("tts-forward-button").disabled = true;
+    $("tts-status-title").textContent = "음성 읽기 미지원";
+    $("tts-status-detail").textContent = "Chrome, Edge 또는 Safari 최신 버전에서 열어 주세요.";
+  }
+
+  function selectedSpeechVoice() {
+    const selectedName = state.settings?.tts_voice || "";
+    if (selectedName) {
+      const selected = state.speech.voices.find((voice) => voice.name === selectedName);
+      if (selected) return selected;
+    }
+    return state.speech.voices.find((voice) => /^ko([-_]|$)/i.test(voice.lang || "") && voice.default)
+      || state.speech.voices.find((voice) => /^ko([-_]|$)/i.test(voice.lang || ""))
+      || null;
+  }
+
+  function resetSpeechPosition(progress) {
+    state.speech.token += 1;
+    state.speech.active = false;
+    state.speech.paused = false;
+    state.speech.blockIndex = clamp(Number(progress?.block_index || 0), 0, Math.max(0, state.blocks.length - 1));
+    state.speech.offset = clamp(Number(progress?.character_offset || 0), 0, state.blocks[state.speech.blockIndex]?.content?.length || 0);
+    clearSpeechHighlight();
+    updateSpeechUi();
+  }
+
+  function normalizeSpeechPosition(blockIndex, offset) {
+    let index = clamp(Number(blockIndex || 0), 0, Math.max(0, state.blocks.length - 1));
+    let charOffset = Math.max(0, Number(offset || 0));
+    while (index < state.blocks.length) {
+      const content = String(state.blocks[index]?.content || "");
+      charOffset = clamp(charOffset, 0, content.length);
+      while (charOffset < content.length && /\s/.test(content[charOffset])) charOffset += 1;
+      if (charOffset < content.length) return { blockIndex: index, offset: charOffset };
+      index += 1;
+      charOffset = 0;
+    }
+    const lastIndex = Math.max(0, state.blocks.length - 1);
+    return {
+      blockIndex: lastIndex,
+      offset: String(state.blocks[lastIndex]?.content || "").length,
+      ended: true,
+    };
+  }
+
+  function createSpeechChunk(content, startOffset) {
+    let start = clamp(Number(startOffset || 0), 0, content.length);
+    while (start < content.length && /\s/.test(content[start])) start += 1;
+    if (start >= content.length) return null;
+    let end = Math.min(content.length, start + SPEECH_CHUNK_LENGTH);
+    if (end < content.length) {
+      const sample = content.slice(start, end);
+      const candidates = [
+        sample.lastIndexOf("다. "), sample.lastIndexOf("요. "), sample.lastIndexOf(". "),
+        sample.lastIndexOf("? "), sample.lastIndexOf("! "), sample.lastIndexOf("\n"), sample.lastIndexOf(" "),
+      ].filter((value) => value >= Math.min(60, sample.length / 3));
+      if (candidates.length) {
+        const split = Math.max(...candidates);
+        const punctuationLength = sample.slice(split, split + 3).match(/^(다\.|요\.)/) ? 2 : 1;
+        end = start + split + punctuationLength;
+      }
+    }
+    return { text: content.slice(start, end), startOffset: start, endOffset: end };
+  }
+
+  function getSpeechPosition() {
+    if (!state.currentDocument?.id || !state.blocks.length) return null;
+    const index = clamp(state.speech.blockIndex, 0, state.blocks.length - 1);
+    const element = $(`block-${index}`);
+    if (!element) return null;
+    return buildPosition(element, state.speech.offset);
+  }
+
+  function commitSpeechProgress() {
+    const position = getSpeechPosition();
+    if (!position) return;
+    state.progress = position;
+    setLocalProgress(position);
+    updateProgressDisplay(position.progress_percent);
+  }
+
+  function clearSpeechHighlight() {
+    document.querySelectorAll(".reader-block.tts-active").forEach((element) => element.classList.remove("tts-active"));
+  }
+
+  function highlightSpeechBlock() {
+    clearSpeechHighlight();
+    const element = $(`block-${state.speech.blockIndex}`);
+    if (!element) return;
+    element.classList.add("tts-active");
+    if (state.settings?.tts_auto_scroll && document.visibilityState === "visible") {
+      const rect = element.getBoundingClientRect();
+      const top = getReaderTopOffset();
+      const playerTop = $("tts-player").getBoundingClientRect().top;
+      if (rect.top < top || rect.bottom > playerTop - 16) {
+        element.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+    }
+  }
+
+  function updateSpeechUi(detail) {
+    const playButton = $("tts-play-button");
+    if (!state.speech.supported) return setSpeechUnsupported();
+    if (state.speech.active && !state.speech.paused) {
+      playButton.textContent = "Ⅱ 일시정지";
+      playButton.setAttribute("aria-label", "음성 읽기 일시정지");
+      $("tts-status-title").textContent = "읽는 중";
+    } else if (state.speech.active && state.speech.paused) {
+      playButton.textContent = "▶ 계속 듣기";
+      playButton.setAttribute("aria-label", "음성 읽기 계속");
+      $("tts-status-title").textContent = "일시정지";
+    } else {
+      playButton.textContent = "▶ 읽기";
+      playButton.setAttribute("aria-label", "음성 읽기 시작");
+      $("tts-status-title").textContent = "음성 읽기 준비";
+    }
+    if (detail) {
+      $("tts-status-detail").textContent = detail;
+    } else if (state.currentDocument) {
+      const percent = getSpeechPosition()?.progress_percent || state.progress?.progress_percent || 0;
+      $("tts-status-detail").textContent = `${Number(percent).toFixed(percent >= 10 ? 0 : 1)}% · ${Number(state.settings?.tts_rate || 1).toFixed(1)}배`;
+    }
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.playbackState = state.speech.active
+        ? (state.speech.paused ? "paused" : "playing")
+        : "none";
+    }
+  }
+
+  function startKeepAliveAudio() {
+    if (!state.settings?.tts_background_audio) return;
+    const audio = $("tts-keepalive-audio");
+    if (!audio) return;
+    audio.volume = 0.01;
+    audio.play().catch(() => {
+      $("tts-status-detail").textContent = "백그라운드 재생 보조를 시작하지 못했습니다.";
+    });
+  }
+
+  function stopKeepAliveAudio() {
+    const audio = $("tts-keepalive-audio");
+    if (!audio) return;
+    audio.pause();
+    try { audio.currentTime = 0; } catch { /* noop */ }
+  }
+
+  function configureMediaSession() {
+    if (!("mediaSession" in navigator)) return;
+    const handlers = {
+      play: () => startOrResumeSpeech(),
+      pause: () => pauseSpeech(),
+      stop: () => stopSpeech(),
+      seekbackward: () => jumpSpeechCharacters(-SPEECH_JUMP_CHARACTERS),
+      seekforward: () => jumpSpeechCharacters(SPEECH_JUMP_CHARACTERS),
+      previoustrack: () => moveSpeechBlock(-1),
+      nexttrack: () => moveSpeechBlock(1),
+    };
+    for (const [action, handler] of Object.entries(handlers)) {
+      try { navigator.mediaSession.setActionHandler(action, handler); } catch { /* unsupported action */ }
+    }
+  }
+
+  function setMediaMetadata() {
+    if (!("mediaSession" in navigator) || !("MediaMetadata" in window) || !state.currentDocument) return;
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: state.currentDocument.title || "TXT 문서",
+        artist: "이어읽기 음성 책읽기",
+        album: "개인용 TXT 뷰어",
+        artwork: [
+          { src: new URL("./icons/icon-192.png", location.href).href, sizes: "192x192", type: "image/png" },
+          { src: new URL("./icons/icon-512.png", location.href).href, sizes: "512x512", type: "image/png" },
+        ],
+      });
+    } catch { /* metadata is optional */ }
+  }
+
+  function startSpeechWatchdog() {
+    clearInterval(state.speechWatchdog);
+    state.speechWatchdog = setInterval(() => {
+      if (!state.speech.active || state.speech.paused || state.speech.transitioning) return;
+      if (Date.now() - state.speech.lastStartAt < 3000) return;
+      if (!window.speechSynthesis.speaking && !window.speechSynthesis.pending) speakCurrentChunk();
+    }, 2500);
+  }
+
+  function stopSpeechWatchdog() {
+    clearInterval(state.speechWatchdog);
+    state.speechWatchdog = null;
+  }
+
+  function startOrResumeSpeech() {
+    if (!state.speech.supported || !state.currentDocument || !state.blocks.length) {
+      showToast("이 기기에서는 음성 읽기를 시작할 수 없습니다.");
+      return;
+    }
+    if (state.speech.active && state.speech.paused) {
+      state.speech.paused = false;
+      startKeepAliveAudio();
+      try { window.speechSynthesis.resume(); } catch { /* noop */ }
+      setTimeout(() => {
+        if (state.speech.active && !state.speech.paused && !window.speechSynthesis.speaking) speakCurrentChunk();
+      }, 180);
+      updateSpeechUi("읽던 위치부터 계속합니다.");
+      startSpeechWatchdog();
+      return;
+    }
+    if (state.speech.active) {
+      pauseSpeech();
+      return;
+    }
+
+    const current = getCurrentPosition() || state.progress || { block_index: 0, character_offset: 0 };
+    state.speech.blockIndex = clamp(Number(current.block_index || 0), 0, state.blocks.length - 1);
+    state.speech.offset = clamp(Number(current.character_offset || 0), 0, state.blocks[state.speech.blockIndex]?.content?.length || 0);
+    state.speech.active = true;
+    state.speech.paused = false;
+    setMediaMetadata();
+    configureMediaSession();
+    startKeepAliveAudio();
+    startSpeechWatchdog();
+    speakCurrentChunk();
+  }
+
+  function pauseSpeech() {
+    if (!state.speech.active || state.speech.paused) return;
+    state.speech.paused = true;
+    try { window.speechSynthesis.pause(); } catch { /* noop */ }
+    stopKeepAliveAudio();
+    commitSpeechProgress();
+    saveProgress(true);
+    updateSpeechUi("버튼을 누르면 같은 위치부터 계속합니다.");
+  }
+
+  function stopSpeech(options = {}) {
+    const { save = true, silent = false } = options;
+    const hadSpeech = state.speech.active || state.speech.paused;
+    const speechPosition = hadSpeech ? getSpeechPosition() : null;
+    state.speech.token += 1;
+    state.speech.active = false;
+    state.speech.paused = false;
+    state.speech.transitioning = false;
+    try { window.speechSynthesis?.cancel(); } catch { /* noop */ }
+    stopKeepAliveAudio();
+    stopSpeechWatchdog();
+    clearSpeechHighlight();
+    if (speechPosition) {
+      state.progress = speechPosition;
+      setLocalProgress(speechPosition);
+      updateProgressDisplay(speechPosition.progress_percent);
+    }
+    if (save && speechPosition && state.currentDocument?.id) saveProgress(true, speechPosition);
+    if (!silent) updateSpeechUi("현재 음성 위치가 저장되었습니다.");
+  }
+
+  function restartSpeechAtCurrent() {
+    if (!state.speech.active || state.speech.paused) return;
+    state.speech.token += 1;
+    try { window.speechSynthesis.cancel(); } catch { /* noop */ }
+    setTimeout(() => {
+      if (state.speech.active && !state.speech.paused) speakCurrentChunk();
+    }, 80);
+  }
+
+  function speakCurrentChunk() {
+    if (!state.speech.active || state.speech.paused || !state.currentDocument) return;
+    const normalized = normalizeSpeechPosition(state.speech.blockIndex, state.speech.offset);
+    state.speech.blockIndex = normalized.blockIndex;
+    state.speech.offset = normalized.offset;
+    if (normalized.ended) {
+      finishSpeech();
+      return;
+    }
+    const block = state.blocks[state.speech.blockIndex];
+    const content = String(block?.content || "");
+    const chunk = createSpeechChunk(content, state.speech.offset);
+    if (!chunk) {
+      state.speech.blockIndex += 1;
+      state.speech.offset = 0;
+      speakCurrentChunk();
+      return;
+    }
+
+    state.speech.transitioning = true;
+    state.speech.chunkStart = chunk.startOffset;
+    state.speech.chunkEnd = chunk.endOffset;
+    state.speech.offset = chunk.startOffset;
+    state.speech.token += 1;
+    const token = state.speech.token;
+    const utterance = new SpeechSynthesisUtterance(chunk.text);
+    state.speech.utterance = utterance;
+    utterance.lang = selectedSpeechVoice()?.lang || "ko-KR";
+    utterance.rate = clamp(Number(state.settings?.tts_rate || 1), 0.6, 2);
+    utterance.pitch = 1;
+    utterance.volume = 1;
+    const voice = selectedSpeechVoice();
+    if (voice) utterance.voice = voice;
+
+    utterance.onstart = () => {
+      if (token !== state.speech.token) return;
+      state.speech.transitioning = false;
+      state.speech.lastStartAt = Date.now();
+      highlightSpeechBlock();
+      updateSpeechUi();
+    };
+    utterance.onboundary = (event) => {
+      if (token !== state.speech.token || !state.speech.active) return;
+      const relative = Number.isFinite(event.charIndex) ? event.charIndex : 0;
+      state.speech.offset = clamp(chunk.startOffset + relative, chunk.startOffset, chunk.endOffset);
+      commitSpeechProgress();
+    };
+    utterance.onend = () => {
+      if (token !== state.speech.token || !state.speech.active || state.speech.paused) return;
+      state.speech.transitioning = true;
+      state.speech.offset = chunk.endOffset;
+      commitSpeechProgress();
+      setTimeout(() => {
+        state.speech.transitioning = false;
+        speakCurrentChunk();
+      }, 35);
+    };
+    utterance.onerror = (event) => {
+      if (token !== state.speech.token) return;
+      state.speech.transitioning = false;
+      if (["canceled", "interrupted"].includes(event.error)) return;
+      console.warn("음성 읽기 오류", event.error);
+      stopSpeech({ save: true, silent: true });
+      updateSpeechUi(`음성 오류: ${event.error || "알 수 없음"}`);
+    };
+
+    try {
+      window.speechSynthesis.speak(utterance);
+    } catch (error) {
+      console.warn("음성 시작 실패", error);
+      stopSpeech({ save: true, silent: true });
+      updateSpeechUi("음성을 시작하지 못했습니다. 다른 목소리를 선택해 보세요.");
+    }
+  }
+
+  function finishSpeech() {
+    state.speech.active = true;
+    state.speech.paused = false;
+    commitSpeechProgress();
+    saveProgress(true);
+    state.speech.active = false;
+    stopKeepAliveAudio();
+    stopSpeechWatchdog();
+    clearSpeechHighlight();
+    updateSpeechUi("문서 끝까지 모두 읽었습니다.");
+  }
+
+  function setSpeechPosition(blockIndex, offset, shouldRestart = true) {
+    state.speech.blockIndex = clamp(blockIndex, 0, Math.max(0, state.blocks.length - 1));
+    state.speech.offset = clamp(offset, 0, state.blocks[state.speech.blockIndex]?.content?.length || 0);
+    commitSpeechProgress();
+    highlightSpeechBlock();
+    if (shouldRestart && state.speech.active && !state.speech.paused) restartSpeechAtCurrent();
+    else updateSpeechUi();
+  }
+
+  function jumpSpeechCharacters(delta) {
+    if (!state.blocks.length) return;
+    if (!state.speech.active) {
+      const current = getCurrentPosition() || state.progress || { block_index: 0, character_offset: 0 };
+      state.speech.blockIndex = Number(current.block_index || 0);
+      state.speech.offset = Number(current.character_offset || 0);
+    }
+    const block = state.blocks[state.speech.blockIndex] || state.blocks[0];
+    const absolute = Number(block?.char_start || 0) + state.speech.offset;
+    const total = Math.max(1, Number(state.currentDocument?.total_characters || 1));
+    const target = clamp(absolute + delta, 0, total - 1);
+    let targetBlock = state.blocks[0];
+    for (const candidate of state.blocks) {
+      if (Number(candidate.char_start || 0) <= target) targetBlock = candidate;
+      else break;
+    }
+    const targetIndex = Number(targetBlock.block_index || 0);
+    const targetOffset = target - Number(targetBlock.char_start || 0);
+    setSpeechPosition(targetIndex, targetOffset);
+    updateSpeechUi(delta < 0 ? "약 15초 뒤로 이동했습니다." : "약 15초 앞으로 이동했습니다.");
+  }
+
+  function moveSpeechBlock(direction) {
+    if (!state.blocks.length) return;
+    const targetIndex = clamp(state.speech.blockIndex + direction, 0, state.blocks.length - 1);
+    setSpeechPosition(targetIndex, 0);
   }
 
   function searchInDocument() {
@@ -988,6 +1451,22 @@
     $("content-width-select").addEventListener("change", (event) => changeSetting("content_width", Number(event.target.value)));
     $("theme-select").addEventListener("change", (event) => changeSetting("theme", event.target.value));
     $("wake-lock-toggle").addEventListener("change", (event) => changeSetting("screen_wake_lock", event.target.checked));
+    $("tts-play-button").addEventListener("click", startOrResumeSpeech);
+    $("tts-stop-button").addEventListener("click", () => stopSpeech());
+    $("tts-back-button").addEventListener("click", () => jumpSpeechCharacters(-SPEECH_JUMP_CHARACTERS));
+    $("tts-forward-button").addEventListener("click", () => jumpSpeechCharacters(SPEECH_JUMP_CHARACTERS));
+    $("tts-rate-range").addEventListener("input", (event) => changeSetting("tts_rate", Number(event.target.value)));
+    $("tts-inline-rate-range").addEventListener("input", (event) => changeSetting("tts_rate", Number(event.target.value)));
+    $("tts-voice-select").addEventListener("change", (event) => changeSetting("tts_voice", event.target.value));
+    $("tts-auto-scroll-toggle").addEventListener("change", (event) => changeSetting("tts_auto_scroll", event.target.checked));
+    $("tts-background-toggle").addEventListener("change", (event) => changeSetting("tts_background_audio", event.target.checked));
+    if (state.speech.supported) {
+      window.speechSynthesis.addEventListener?.("voiceschanged", refreshSpeechVoices);
+      refreshSpeechVoices();
+      configureMediaSession();
+    } else {
+      setSpeechUnsupported();
+    }
     $("fullscreen-button").addEventListener("click", toggleFullscreen);
     $("reader-search-button").addEventListener("click", searchInDocument);
     $("reader-search-input").addEventListener("keydown", (event) => {
